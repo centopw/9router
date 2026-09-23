@@ -252,16 +252,15 @@ export function resetComboRotation(comboName) {
  * @returns {string[]|null} Array of models or null if not a combo
  */
 export function getComboModelsFromData(modelStr, combosData) {
-  // Don't check if it's in provider/model format
   if (modelStr.includes("/")) return null;
-  
-  // Handle both array and object formats
   const combos = Array.isArray(combosData) ? combosData : (combosData?.combos || []);
-  
   const combo = combos.find(c => c.name === modelStr);
-  if (combo && combo.models && combo.models.length > 0) {
-    return combo.models;
+  if (!combo) return null;
+  if (combo.config?.type === "smart") {
+    const models = Object.values(combo.config.models || {}).filter((model) => typeof model === "string" && model.trim());
+    return [...new Set(models)];
   }
+  if (combo.models && combo.models.length > 0) return combo.models;
   return null;
 }
 

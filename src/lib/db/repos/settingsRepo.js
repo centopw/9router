@@ -17,6 +17,15 @@ const DEFAULT_SETTINGS = {
   comboStrategy: "fallback",
   comboStickyRoundRobinLimit: 1,
   comboStrategies: {},
+  smartRouting: {
+    enabled: false,
+    defaultSlot: "default",
+    smolMaxChars: 350,
+    fastMaxChars: 900,
+    slowContextChars: 12000,
+    slowMessageCount: 24,
+    routeVisionTo: "default",
+  },
   capacityAdapter: {
     vision: { enabled: true, roundRobin: false, models: [] },
     pdf: { enabled: false, roundRobin: false, models: [] },
@@ -73,6 +82,7 @@ async function readRaw() {
 // Merge raw settings with defaults; backward-compat for missing keys
 export function mergeWithDefaults(raw) {
   const merged = { ...DEFAULT_SETTINGS, ...(raw || {}) };
+  merged.smartRouting = { ...DEFAULT_SETTINGS.smartRouting, ...(raw?.smartRouting || {}) };
   for (const [key, defVal] of Object.entries(DEFAULT_SETTINGS)) {
     if (merged[key] === undefined) {
       if (

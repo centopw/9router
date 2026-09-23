@@ -8,7 +8,7 @@ import {
   isValidApiKey,
 } from "../services/auth.js";
 import { handleAntigravityQuotaError, clearAntigravityStrikes } from "../services/antigravityQuota.js";
-import { getSettings } from "@/lib/localDb";
+import { getSettings, getComboByName } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
@@ -17,6 +17,7 @@ import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { handleComboChat, handleFusionChat, detectRequiredCapabilities } from "open-sse/services/combo.js";
 import { augmentModelsWithCapacityAdapter, withCapacityAdapterStripping, getActiveAdapterStrategy } from "open-sse/services/capacityAdapter.js";
+import { getSmartComboModels, isSmartCombo } from "open-sse/services/smartCombo.js";
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
@@ -91,6 +92,26 @@ export async function handleChat(request, clientRawRequest = null) {
   if (bypassResponse) return bypassResponse.response || bypassResponse;
 
   const requiredCapabilities = detectRequiredCapabilities(body);
+  // Smart combos choose a configured tier before using the normal combo fallback path.
+  const combo = !modelStr.includes("/") ? await getComboByName(modelStr) : null;
+  if (isSmartCombo(combo) && settings.smartRouting?.enabled !== false) {
+    const { models, selectedSlot, reason } = getSmartComboModels(combo.config, body, settings.smartRouting);
+    if (models.length === 0) {
+      return errorResponse(400, `Smart combo "${modelStr}" has no configured models`);
+    }
+    log.info("CHAT", `Smart combo "${modelStr}" selected ${selectedSlot} (${reason})`);
+    const comboStrategies = settings.comboStrategies || {};
+    const comboStrategy = comboStrategies[modelStr]?.fallbackStrategy || "fallback";
+    return handleComboChat({
+      body,
+      models,
+      handleSingleModel: (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+      log,
+      comboName: modelStr,
+      comboStrategy,
+      comboStickyLimit: settings.comboStickyRoundRobinLimit,
+    });
+  }
 
   // Check if model is a combo (has multiple models with fallback)
   const comboModels = await getComboModels(modelStr);

@@ -55,11 +55,20 @@ const STRATEGY_OPTIONS = [
 export default function CombosPage() {
   const [combos, setCombos] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [smartCombos, setSmartCombos] = useState([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingCombo, setEditingCombo] = useState(null);
   const [activeProviders, setActiveProviders] = useState([]);
   const [comboStrategies, setComboStrategies] = useState({});
   const [capacityAdapter, setCapacityAdapter] = useState(EMPTY_CAPACITY_ADAPTER);
+  const [smartRouting, setSmartRouting] = useState({
+    enabled: false, defaultSlot: "default", smolMaxChars: 350, fastMaxChars: 900,
+    slowContextChars: 12000, slowMessageCount: 24, routeVisionTo: "default",
+  });
+  const [tryoutComboId, setTryoutComboId] = useState("");
+  const [tryoutText, setTryoutText] = useState("");
+  const [tryoutResult, setTryoutResult] = useState(null);
+  const [tryoutLoading, setTryoutLoading] = useState(false);
   const { getCaps } = useModelCaps();
   const [confirmState, setConfirmState] = useState(null);
   const [presetLoading, setPresetLoading] = useState(null); // "cursor" | "claude" | null
@@ -163,15 +172,18 @@ export default function CombosPage() {
       const combosData = await combosRes.json();
       const providersData = await providersRes.json();
       const settingsData = settingsRes.ok ? await settingsRes.json() : {};
-
-      // Only LLM combos here - webSearch/webFetch combos belong to media-providers/web
-      if (combosRes.ok) setCombos((combosData.combos || []).filter(c => !c.kind || c.kind === "llm"));
+      const allCombos = combosData.combos || [];
+      if (combosRes.ok) {
+        setSmartCombos(allCombos.filter(c => c.config?.type === "smart"));
+        setCombos(allCombos.filter(c => !c.kind || c.kind === "llm"));
+      }
       if (providersRes.ok) {
         setActiveProviders(providersData.connections || []);
       }
       setComboStrategies(settingsData.comboStrategies || {});
       const rawAdapter = settingsData.capacityAdapter || {};
       const normalized = {};
+      setSmartRouting((prev) => ({ ...prev, ...(settingsData.smartRouting || {}) }));
       for (const cap of CAPACITY_ADAPTER_CAPS) {
         normalized[cap.key] = normalizeCapEntry(rawAdapter[cap.key]);
       }
@@ -196,6 +208,27 @@ export default function CombosPage() {
     }
   };
 
+  const runSmartTryout = async () => {
+    const combo = smartCombos.find((item) => item.id === tryoutComboId) || smartCombos[0];
+    if (!combo || !tryoutText.trim()) return;
+    setTryoutLoading(true);
+    setTryoutResult(null);
+    try {
+      const res = await fetch("/api/combos/smart-preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: tryoutText, models: combo.config?.models || {}, settings: smartRouting }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Preview failed");
+      setTryoutResult(data);
+    } catch (error) {
+      setTryoutResult({ error: error.message });
+    } finally {
+      setTryoutLoading(false);
+    }
+  };
+
   const handleCreate = async (data) => {
     try {
       const res = await fetch("/api/combos", {
@@ -204,7 +237,12 @@ export default function CombosPage() {
         body: JSON.stringify(data),
       });
       if (res.ok) {
+        const createdCombo = await res.json();
         await fetchData();
+        if (createdCombo.config?.type === "smart") {
+          setTryoutComboId(createdCombo.id);
+          setTryoutResult(null);
+        }
         setShowCreateModal(false);
       } else {
         const err = await res.json();
@@ -263,6 +301,7 @@ export default function CombosPage() {
               await persistComboStrategies(pruneStrategiesForNames([combo.name]));
             }
             setCombos((prev) => prev.filter((c) => c.id !== id));
+            setSmartCombos((prev) => prev.filter((c) => c.id !== id));
             setSelectedIds((prev) => prev.filter((x) => x !== id));
           }
           setConfirmState(null);
@@ -366,12 +405,11 @@ export default function CombosPage() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <p className="text-sm text-text-muted mt-1">
-            Group models under one name, then pick a strategy per combo:
+            Group models under one name, then pick a strategy per combo. Smart combos choose Default, Smol, Fast, or Slow automatically.
           </p>
           <ul className="text-sm text-text-muted mt-2 flex flex-col gap-1">
-            <li><span className="font-medium text-text-main">Fallback</span> — tries models in order (next on failure)</li>
-            <li><span className="font-medium text-text-main">Round Robin</span> — rotates models across requests to spread load</li>
-            <li><span className="font-medium text-text-main">Fusion</span> — queries all models in parallel, then a judge synthesizes one answer. Best quality, but costs the most: every request bills all panel models + the judge (N+1 calls)</li>
+            <li><span className="font-medium text-text-main">Smart</span> — route short requests to cheap models and long planning requests to powerful models.</li>
+            <li><span className="font-medium text-text-main">Fallback / Round Robin / Fusion</span> — control ordinary combo execution.</li>
           </ul>
           <p className="hidden text-xs text-text-muted mt-3 max-w-2xl">
             <span className="font-medium text-text-main">Cursor / Claude Default</span> create combos named exactly like those clients&apos; model IDs (e.g. <code className="font-mono">composer-2.5</code>, <code className="font-mono">opus</code>), seeded with the matching <code className="font-mono">cu/…</code> or <code className="font-mono">cc/…</code> route so traffic can hit 9router without the prefix.
@@ -509,6 +547,34 @@ export default function CombosPage() {
         </div>
       )}
 
+
+      <Card>
+        <div className="flex flex-col gap-3">
+          <div>
+            <div className="flex items-center gap-2"><span className="material-symbols-outlined text-primary">science</span><h2 className="font-semibold">Try Smart Routing</h2></div>
+            <p className="mt-1 text-xs text-text-muted">Enter a sample request to preview the tier, model, and heuristic confidence before sending it through the gateway.</p>
+          </div>
+          {smartCombos.length === 0 ? (
+            <p className="text-xs text-text-muted">Create a Smart Combo first to try routing.</p>
+          ) : (
+            <>
+              <Select label="Smart combo" options={smartCombos.map((combo) => ({ value: combo.id, label: combo.name }))} value={tryoutComboId || smartCombos[0]?.id} onChange={(e) => { setTryoutComboId(e.target.value); setTryoutResult(null); }} />
+              <textarea value={tryoutText} onChange={(e) => setTryoutText(e.target.value)} placeholder="Example: Plan a migration for this service and explain the risks..." rows={4} className="w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-primary" />
+              <Button icon="play_arrow" onClick={runSmartTryout} disabled={tryoutLoading || !tryoutText.trim()} className="w-full sm:w-fit">{tryoutLoading ? "Analyzing..." : "Try Routing"}</Button>
+              {tryoutResult?.error && <p className="text-xs text-red-500">{tryoutResult.error}</p>}
+              {tryoutResult && !tryoutResult.error && (
+                <div className="grid grid-cols-1 gap-2 rounded-lg border border-primary/30 bg-primary/5 p-3 sm:grid-cols-3">
+                  <div><p className="text-[11px] text-text-muted">Selected tier</p><p className="font-semibold capitalize">{tryoutResult.slot}</p></div>
+                  <div><p className="text-[11px] text-text-muted">Model</p><code className="block truncate text-xs">{tryoutResult.model || "No model configured"}</code></div>
+                  <div><p className="text-[11px] text-text-muted">Confidence</p><p className="font-semibold">{tryoutResult.confidence}%</p></div>
+                  <p className="text-[11px] text-text-muted sm:col-span-3">{tryoutResult.reason}. {tryoutResult.note}</p>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </Card>
+
       {/* Capacity Adapter */}
       <CapacityAdapterSection
         capacityAdapter={capacityAdapter}
@@ -516,6 +582,7 @@ export default function CombosPage() {
         activeProviders={activeProviders}
         getCaps={getCaps}
       />
+
 
       {/* Create Modal - Use key to force remount and reset state */}
       {showCreateModal && (
@@ -562,6 +629,12 @@ const fmtK = (n) => {
   }
   return `${Math.round(n / 1000)}k`;
 };
+const SMART_SLOTS = [
+  { key: "default", label: "Default", help: "Balanced model for normal requests." },
+  { key: "smol", label: "Smol", help: "Cheap model for short requests." },
+  { key: "fast", label: "Fast", help: "Low-latency interactive model." },
+  { key: "slow", label: "Slow", help: "Powerful model for planning and long tasks." },
+];
 
 function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], copied, onCopy, onEdit, onDelete, strategy = {}, onSetStrategy, selected = false, onToggleSelect }) {
   const [showJudgeSelect, setShowJudgeSelect] = useState(false);
@@ -569,6 +642,7 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
   const judge = strategy.judgeModel || "";
   const isFusion = current === "fusion";
   const comboCaps = aggregateComboCapabilities(combo.models, comboByName);
+  const isSmart = combo.config?.type === "smart";
 
   return (
     <Card padding="sm" className={`group ${selected ? "ring-1 ring-primary/40 bg-primary/[0.03]" : ""}`}>
@@ -584,13 +658,22 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
               aria-label={`Select ${combo.name}`}
             />
           </label>
-          <div className="size-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
-            <span className="material-symbols-outlined text-primary text-[18px]">layers</span>
+          <div className={`size-8 rounded-lg flex items-center justify-center shrink-0 ${isSmart ? "bg-fuchsia-500/10" : "bg-primary/10"}`}>
+            <span className={`material-symbols-outlined text-[18px] ${isSmart ? "text-fuchsia-500" : "text-primary"}`}>{isSmart ? "auto_awesome" : "layers"}</span>
           </div>
           <div className="min-w-0 flex-1">
-            <code className="block truncate font-mono text-sm font-medium">{combo.name}</code>
+            <div className="flex items-center gap-2">
+              <code className="block truncate font-mono text-sm font-medium">{combo.name}</code>
+              {isSmart && <span className="shrink-0 rounded-full bg-fuchsia-500/10 px-2 py-0.5 text-[10px] font-medium text-fuchsia-600 dark:text-fuchsia-400">Smart</span>}
+            </div>
             <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
-              {combo.models.length === 0 ? (
+              {isSmart ? (
+                Object.entries(combo.config?.models || {}).filter(([, model]) => model).map(([slot, model]) => (
+                  <code key={slot} className="inline-flex max-w-full items-center gap-1 rounded bg-black/5 px-1.5 py-0.5 font-mono text-[11px] text-text-muted dark:bg-white/5">
+                    <span className="capitalize text-primary">{slot}</span><span>:</span><span className="truncate">{model}</span>
+                  </code>
+                ))
+              ) : combo.models.length === 0 ? (
                 <span className="text-xs text-text-muted italic">No models</span>
               ) : (
                 combo.models.slice(0, 3).map((model, index) => (
@@ -604,9 +687,7 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
                   </code>
                 ))
               )}
-              {combo.models.length > 3 && (
-                <span className="text-[10px] text-text-muted">+{combo.models.length - 3} more</span>
-              )}
+              {!isSmart && combo.models.length > 3 && <span className="text-[10px] text-text-muted">+{combo.models.length - 3} more</span>}
             </div>
             {comboCaps && (
               <div className="mt-1 flex items-center gap-2 text-[10px] text-text-muted">
@@ -615,7 +696,7 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
                 <span>max {fmtK(comboCaps.maxOutput)}</span>
               </div>
             )}
-            {/* Fusion: judge picker (Auto = first model) */}
+            {isSmart && <p className="mt-1 text-[11px] text-text-muted">Automatically selects a tier when Smart Routing is enabled.</p>}
             {isFusion && (
               <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
                 <span className="text-[11px] font-medium text-text-muted">Judge</span>
@@ -627,15 +708,7 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
                   <span className="material-symbols-outlined text-[13px]">gavel</span>
                   <span className="truncate">{judge || `Auto — ${combo.models[0] || "first model"}`}</span>
                 </button>
-                {judge && (
-                  <button
-                    onClick={() => onSetStrategy({ judgeModel: "" })}
-                    className="p-0.5 rounded text-text-muted hover:text-red-500 hover:bg-red-500/10 transition-colors"
-                    title="Reset judge to Auto"
-                  >
-                    <span className="material-symbols-outlined text-[13px]">close</span>
-                  </button>
-                )}
+                {judge && <button onClick={() => onSetStrategy({ judgeModel: "" })} className="p-0.5 rounded text-text-muted hover:text-red-500 hover:bg-red-500/10 transition-colors" title="Reset judge to Auto"><span className="material-symbols-outlined text-[13px]">close</span></button>}
               </div>
             )}
           </div>
@@ -643,15 +716,20 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
 
         {/* Actions */}
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:gap-3 sm:shrink-0">
-          {/* Strategy selector — always visible */}
-          <div className="w-full sm:w-[200px]">
-            <Select
-              options={STRATEGY_OPTIONS}
-              value={current}
-              onChange={(e) => onSetStrategy({ fallbackStrategy: e.target.value })}
-              selectClassName="py-1.5 text-xs"
-            />
-          </div>
+          {isSmart ? (
+            <span className="inline-flex items-center justify-center rounded border border-fuchsia-500/20 bg-fuchsia-500/5 px-2 py-1.5 text-xs font-medium text-fuchsia-600 dark:text-fuchsia-400">
+              Auto tier selection
+            </span>
+          ) : (
+            <div className="w-full sm:w-[200px]">
+              <Select
+                options={STRATEGY_OPTIONS}
+                value={current}
+                onChange={(e) => onSetStrategy({ fallbackStrategy: e.target.value })}
+                selectClassName="py-1.5 text-xs"
+              />
+            </div>
+          )}
 
           <div className="grid grid-cols-3 gap-1 sm:flex">
             <button
@@ -938,12 +1016,16 @@ function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMove
 }
 
 function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindFilter = null }) {
-  // Initialize state with combo values - key prop on parent handles reset on remount
+  // Parent keys remount the form for create/edit transitions.
   const [name, setName] = useState(combo?.name || "");
+  const [mode, setMode] = useState(combo?.config?.type === "smart" ? "smart" : "fallback");
   const [models, setModels] = useState(combo?.models || []);
+  const [smartModels, setSmartModels] = useState({ ...(combo?.config?.models || {}) });
+  const [activeSmartSlot, setActiveSmartSlot] = useState(null);
   const [showModelSelect, setShowModelSelect] = useState(false);
   const [saving, setSaving] = useState(false);
   const [nameError, setNameError] = useState("");
+  const [modelError, setModelError] = useState("");
   const [modelAliases, setModelAliases] = useState({});
 
   const sensors = useSensors(
@@ -1009,6 +1091,12 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
   const handleDeselectModel = (model) => {
     setModels(models.filter((m) => m !== model.value));
   };
+  const handleSmartModelSelect = (model) => {
+    if (!activeSmartSlot) return;
+    setSmartModels((prev) => ({ ...prev, [activeSmartSlot]: model.value }));
+    setModelError("");
+    setActiveSmartSlot(null);
+  };
 
   const handleRemoveModel = (index) => {
     setModels(models.filter((_, i) => i !== index));
@@ -1030,8 +1118,18 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
 
   const handleSave = async () => {
     if (!validateName(name)) return;
+    if (mode === "smart" && !Object.values(smartModels).some(Boolean)) {
+      setModelError("Choose at least one model tier before creating this combo.");
+      return;
+    }
+    setModelError("");
     setSaving(true);
-    await onSave({ name: name.trim(), models });
+    await onSave({
+      name: name.trim(),
+      kind: "llm",
+      models: mode === "smart" ? [] : models,
+      config: mode === "smart" ? { type: "smart", models: smartModels } : null,
+    });
     setSaving(false);
   };
 
@@ -1059,51 +1157,68 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
             </p>
           </div>
 
-          {/* Models */}
-          <div>
-            <label className="text-sm font-medium mb-1.5 block">Models</label>
+          {/* Routing mode */}
+          <Select
+            label="Routing mode"
+            options={[
+              { value: "fallback", label: "Normal combo — try models in order" },
+              { value: "smart", label: "Smart combo — choose a tier per request" },
+            ]}
+            value={mode}
+            onChange={(e) => {
+              setMode(e.target.value);
+              setModelError("");
+            }}
+          />
 
-            {models.length === 0 ? (
-              <div className="text-center py-4 border border-dashed border-black/10 dark:border-white/10 rounded-lg bg-black/[0.01] dark:bg-white/[0.01]">
-                <span className="material-symbols-outlined text-text-muted text-xl mb-1">layers</span>
-                <p className="text-xs text-text-muted">No models added yet</p>
+          {mode === "smart" ? (
+            <div className="flex flex-col gap-2">
+              <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-xs text-text-muted">Assign at least one provider model to a tier. Enable Smart Routing in Settings before live requests use automatic selection.</p>
+                <a
+                  href="/dashboard/profile#smart-routing"
+                  className="shrink-0 self-start rounded border border-primary/30 px-2 py-1 text-xs font-medium text-primary hover:bg-primary/5"
+                >
+                  Open Settings
+                </a>
               </div>
-            ) : (
-            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd} modifiers={[restrictToVerticalAxis, restrictToParentElement]}>
-              <SortableContext items={modelItems.map((m) => m.uid)} strategy={verticalListSortingStrategy}>
-                <div className="flex max-h-[55vh] min-w-0 flex-col gap-1 overflow-y-auto sm:max-h-[350px]">
-                  {modelItems.map(({ uid, model }, index) => (
-                    <ModelItem
-                      key={uid}
-                      id={uid}
-                      index={index}
-                      model={model}
-                      isFirst={index === 0}
-                      isLast={index === modelItems.length - 1}
-                      onEdit={(newVal) => {
-                        const updated = [...models];
-                        updated[index] = newVal;
-                        setModels(updated);
-                      }}
-                      onMoveUp={() => handleMoveUp(index)}
-                      onMoveDown={() => handleMoveDown(index)}
-                      onRemove={() => handleRemoveModel(index)}
-                    />
-                  ))}
+              {SMART_SLOTS.map((slot) => (
+                <div key={slot.key} className="rounded-lg border border-border p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0"><p className="text-sm font-medium">{slot.label}</p><p className="text-[11px] text-text-muted">{slot.help}</p></div>
+                    <button type="button" onClick={() => setActiveSmartSlot(slot.key)} className="shrink-0 rounded border border-dashed border-primary/50 px-2 py-1 text-xs text-primary hover:bg-primary/5">{smartModels[slot.key] ? "Change" : "Choose"}</button>
+                  </div>
+                  {smartModels[slot.key] && <code className="mt-2 block truncate rounded bg-surface-2 px-2 py-1 text-xs">{smartModels[slot.key]}</code>}
                 </div>
-              </SortableContext>
-            </DndContext>
-            )}
-
-            {/* Add Model button */}
-            <button
-              onClick={() => setShowModelSelect(true)}
-              className="w-full mt-2 py-2 border border-dashed border-black/10 dark:border-white/10 rounded-lg text-xs text-primary font-medium hover:text-primary hover:border-primary/50 transition-colors flex items-center justify-center gap-1"
-            >
-              <span className="material-symbols-outlined text-[16px]">add</span>
-              Add Model
-            </button>
-          </div>
+              ))}
+              {modelError && <p className="text-xs text-red-500" role="alert">{modelError}</p>}
+            </div>
+          ) : (
+            <div>
+              <label className="text-sm font-medium mb-1.5 block">Models</label>
+              {models.length === 0 ? (
+                <div className="text-center py-4 border border-dashed border-black/10 dark:border-white/10 rounded-lg bg-black/[0.01] dark:bg-white/[0.01]">
+                  <span className="material-symbols-outlined text-text-muted text-xl mb-1">layers</span>
+                  <p className="text-xs text-text-muted">No models added yet</p>
+                </div>
+              ) : (
+                <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd} modifiers={[restrictToVerticalAxis, restrictToParentElement]}>
+                  <SortableContext items={modelItems.map((m) => m.uid)} strategy={verticalListSortingStrategy}>
+                    <div className="flex max-h-[55vh] min-w-0 flex-col gap-1 overflow-y-auto sm:max-h-[350px]">
+                      {modelItems.map(({ uid, model }, index) => (
+                        <ModelItem key={uid} id={uid} index={index} model={model} isFirst={index === 0} isLast={index === modelItems.length - 1}
+                          onEdit={(newVal) => { const updated = [...models]; updated[index] = newVal; setModels(updated); }}
+                          onMoveUp={() => handleMoveUp(index)} onMoveDown={() => handleMoveDown(index)} onRemove={() => handleRemoveModel(index)} />
+                      ))}
+                    </div>
+                  </SortableContext>
+                </DndContext>
+              )}
+              <button onClick={() => setShowModelSelect(true)} className="w-full mt-2 py-2 border border-dashed border-black/10 dark:border-white/10 rounded-lg text-xs text-primary font-medium hover:border-primary/50 transition-colors flex items-center justify-center gap-1">
+                <span className="material-symbols-outlined text-[16px]">add</span>Add Model
+              </button>
+            </div>
+          )}
 
           {/* Actions */}
           <div className="flex flex-col gap-2 pt-1 sm:flex-row">
@@ -1135,6 +1250,17 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
           kindFilter={kindFilter}
           addedModelValues={models}
           closeOnSelect={false}
+        />
+      )}
+      {activeSmartSlot && (
+        <ModelSelectModal
+          isOpen
+          onClose={() => setActiveSmartSlot(null)}
+          onSelect={handleSmartModelSelect}
+          activeProviders={activeProviders}
+          modelAliases={modelAliases}
+          title={`Choose ${SMART_SLOTS.find((slot) => slot.key === activeSmartSlot)?.label} Model`}
+          addedModelValues={smartModels[activeSmartSlot] ? [smartModels[activeSmartSlot]] : []}
         />
       )}
     </>

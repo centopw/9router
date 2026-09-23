@@ -327,6 +327,21 @@ export default function ProfilePage() {
       console.error("Failed to update combo sticky limit:", err);
     }
   };
+  const updateSmartRoutingEnabled = async (enabled) => {
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ smartRouting: { ...(settings.smartRouting || {}), enabled } }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSettings((prev) => ({ ...prev, smartRouting: data.smartRouting }));
+      }
+    } catch (err) {
+      console.error("Failed to update smart routing:", err);
+    }
+  };
 
   const updateRequireLogin = async (requireLogin) => {
     try {
@@ -1433,6 +1448,31 @@ export default function ProfilePage() {
               )}
             </div>
           )}
+        </Card>
+
+        {/* Optional Smart Routing */}
+        <Card id="smart-routing" className="scroll-mt-6">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2 rounded-lg bg-fuchsia-500/10 text-fuchsia-500 shrink-0">
+                <span className="material-symbols-outlined text-[20px]">auto_awesome</span>
+              </div>
+              <div>
+                <p className="font-medium text-sm sm:text-base">Smart Routing</p>
+                <p className="text-xs sm:text-sm text-text-muted">
+                  Optional tier routing for Smart Combos. Disabled by default to avoid unexpected model selection or resource use.
+                </p>
+              </div>
+            </div>
+            <Toggle
+              checked={settings.smartRouting?.enabled === true}
+              onChange={(enabled) => updateSmartRoutingEnabled(enabled)}
+              disabled={loading}
+            />
+          </div>
+          <div className="mt-3 rounded-lg border border-border/50 bg-surface-2/40 p-3 text-xs text-text-muted">
+            Enable this only after configuring a Smart Combo under <span className="font-medium text-text-main">Combo &amp; Vision Adapter</span>. Existing ordinary combos are unaffected.
+          </div>
         </Card>
 
         {/* Routing Preferences */}
